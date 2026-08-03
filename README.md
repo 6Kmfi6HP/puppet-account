@@ -1,6 +1,6 @@
-# FreeSocks Register SDK
+# Puppet Account
 
-协议层注册工具：无需人工打开 `/get-account` 页面完成免费号注册，作为后续 Telegram 机器人的基础库。
+FreeSocks 无头注册 SDK（仓库名 `puppet-account`）。协议层注册工具：无需人工打开 `/get-account` 页面完成免费号注册，作为后续 Telegram 机器人的基础库。
 
 > **License**：[GPL-3.0-or-later](LICENSE)。
 
@@ -52,7 +52,7 @@ bun run register -- --referral FSR-XXXX --mode freedom-ws
 ## 作为库
 
 ```ts
-import { registerAccount, FreeSocksClient, discoverPins } from '@freesocks-reverse/register-sdk';
+import { registerAccount, FreeSocksClient, discoverPins } from '@freesocks-reverse/puppet-account';
 
 // 一键注册
 const account = await registerAccount({
