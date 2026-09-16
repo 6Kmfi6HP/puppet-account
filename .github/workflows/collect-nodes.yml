@@ -1,0 +1,175 @@
+# collect-nodes — 每日在 GitHub Actions 上提取 FreeSocks 节点，加密后落到 `nodes` 分支。
+#
+# 依赖（并行任务 M1）：bin/register.ts 的
+#   --save-link <path>    生成「订阅链接一行一个」txt
+#   --save-content <path> 生成「订阅内容」txt
+# 本 workflow 只调用该 CLI 并把两份 txt 加密入库，不修改 bin/ 或 src/。
+#
+# 写入的 Secret：`NODES_PASSPHRASE`（仓库 Settings → Secrets and variables → Actions），
+# 用作 gpg 对称加密的口令（AES256）。未配置时本 workflow 会在第一步直接报错退出。
+#
+# 后果分支名：`nodes`（独立 orphan 分支，只包含 links/ 与 content/ 目录，
+# 与 main 无共同历史；本 workflow 除此之外不触碰任何分支）。
+#
+# 失败时人工重放：Actions 页签 → 本 workflow（collect-nodes）→ Run workflow
+# （选 main 分支）手动触发；产物文件名带 run id + UTC 时间戳，重放不会互相覆盖，
+# 商店密钥缺失时先补 NODES_PASSPHRASE 再重放。
+#
+# ✅ 注意：push 到 nodes 分支用的是 GITHUB_TOKEN，默认权限下 GITHUB_TOKEN 触发的
+# push 事件不会再启动新的 workflow run（GitHub 保护机制，防止递归触发），
+# 因此既不需要 [skip ci]，也不会与 ci.yml（push: main / pull_request 触发）相互干扰；
+# nodes 分支也没有 push 触发器挂到本 workflow 上（下方只有 schedule + workflow_dispatch）。
+name: collect-nodes
+
+on:
+  schedule:
+    - cron: '23 4 * * *'  # 每天 04:23 UTC（非整点）执行一次
+  workflow_dispatch:
+
+permissions:
+  contents: write  # 允许 GITHUB_TOKEN push 到 nodes 分支
+
+concurrency:
+  group: nodes-collect
+  cancel-in-progress: false  # 排队而非取消，避免并发写 nodes 分支
+
+jobs:
+  extract:
+    name: Extract, encrypt, publish nodes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check NODES_PASSPHRASE is configured
+        env:
+          NODES_PASSPHRASE: ${{ secrets.NODES_PASSPHRASE }}
+        run: |
+          if [ -z "${NODES_PASSPHRASE:-}" ]; then
+            echo "::error title=missing secret::Set repository secret NODES_PASSPHRASE (Settings → Secrets and variables → Actions), then re-run this workflow."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Chromium for Playwright
+        run: bunx playwright install chromium --with-deps
+
+      - name: Extract nodes (headed chromium via xvfb)
+        id: extract
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          TS="$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "ts=${TS}" >> "$GITHUB_OUTPUT"
+
+          set +e
+          xvfb-run -a bun run bin/register.ts --json --save-link out/links.txt --save-content out/content.txt > out/stdout.json 2> out/stderr.log
+          rc=$?
+          set -e
+
+          # 先把产物文件与 stdout/stderr 中出现的关键字段（订阅链接等）全部 add-mask，
+          # 之后任何日志输出即使包含这些值也会被 GitHub 自动打码。
+          # grep 无匹配时 exit 1，会在 pipefail + set -e 下误判整步失败，故整套管道加 || true。
+          for f in out/links.txt out/content.txt out/stdout.json out/stderr.log; do
+            [ -f "$f" ] || continue
+            { grep -oE '(https?|vmess|ss|trojan|vless)://[^[:space:]"'"'"'<>]+' "$f" || true; } | sort -u | while IFS= read -r u; do
+              [ -n "$u" ] && echo "::add-mask::${u}"
+            done
+          done
+          for f in out/links.txt out/content.txt; do
+            [ -f "$f" ] || continue
+            while IFS= read -r line; do
+              [ -n "$line" ] && echo "::add-mask::${line}"
+            done < "$f"
+          done
+
+          echo "register exit code: ${rc}"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::register failed (exit ${rc}); last stderr lines (URLs masked):"
+            tail -n 40 out/stderr.log || true
+            exit "$rc"
+          fi
+
+          : > out/ok
+          if ! test -s out/links.txt; then
+            echo "::error::links file empty or missing"
+            exit 1
+          fi
+          if ! test -s out/content.txt; then
+            echo "::error::content file empty or missing"
+            exit 1
+          fi
+          echo "links=$(wc -l < out/links.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Encrypt artifacts with gpg (AES256)
+        env:
+          NODES_PASSPHRASE: ${{ secrets.NODES_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          TS="${{ steps.extract.outputs.ts }}"
+          mkdir -p enc
+          gpg --batch --yes --symmetric --cipher-algo AES256 \
+            --passphrase "${NODES_PASSPHRASE}" \
+            -o "enc/links-${TS}.txt.gpg" -c out/links.txt
+          gpg --batch --yes --symmetric --cipher-algo AES256 \
+            --passphrase "${NODES_PASSPHRASE}" \
+            -o "enc/content-${TS}.txt.gpg" -c out/content.txt
+          # 明文从工作区彻底移除，绝不进入 git 索引
+          rm -f out/links.txt out/content.txt out/stdout.json out/stderr.log
+
+      - name: Publish to orphan branch `nodes`
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          TS: ${{ steps.extract.outputs.ts }}
+        run: |
+          set -euo pipefail
+          DATE_PATH="${TS:0:4}/${TS:4:2}/${TS:6:2}"  # YYYY/MM/DD (UTC, 取自提取时刻)
+          PUB="${RUNNER_TEMP}/nodes-pub"
+
+          git init -b nodes "${PUB}"
+          cd "${PUB}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
+          # nodes 已是 orphan：首次 push 直接创建；已存在则基于其 tip 续写历史，
+          # 绝不抓取/合入 main 或其他分支。
+          if git fetch --depth=1 origin nodes; then
+            git checkout -B nodes FETCH_HEAD
+          fi
+
+          mkdir -p "links/${DATE_PATH}" "content/${DATE_PATH}"
+          mv "${GITHUB_WORKSPACE}/enc/links-${TS}.txt.gpg"   "links/${DATE_PATH}/links-${GITHUB_RUN_ID}-${TS}.txt.gpg"
+          mv "${GITHUB_WORKSPACE}/enc/content-${TS}.txt.gpg" "content/${DATE_PATH}/content-${GITHUB_RUN_ID}-${TS}.txt.gpg"
+
+          git add links content
+          if git diff --cached --quiet; then
+            echo "Nothing new to publish."
+            exit 0
+          fi
+          # 不加 [skip ci]：GITHUB_TOKEN 触发的 push 默认不再启动新的 workflow run
+          # （GitHub 官方保护机制防递归），见文件顶部注释。
+          git commit -m "nodes: links+content run ${GITHUB_RUN_ID} (${TS})"
+          git push origin nodes
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f out/ok ]; then
+            TS="${{ steps.extract.outputs.ts }}"
+            DATE_PATH="${TS:0:4}/${TS:4:2}/${TS:6:2}"
+            echo "- run id: \`${GITHUB_RUN_ID}\`"
+            echo "- links extracted: \`${{ steps.extract.outputs.links }}\`"
+            echo "- artifacts on \`nodes\` branch:"
+            echo "  - \`links/${DATE_PATH}/links-${GITHUB_RUN_ID}-${TS}.txt.gpg\`"
+            echo "  - \`content/${DATE_PATH}/content-${GITHUB_RUN_ID}-${TS}.txt.gpg\`"
+          else
+            echo "::warning::Extraction step failed — nothing was published. Re-run via Actions → collect-nodes → Run workflow."
+          fi
