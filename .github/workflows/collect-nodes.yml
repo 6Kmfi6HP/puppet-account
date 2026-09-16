@@ -8,6 +8,11 @@
 # 写入的 Secret：`NODES_PASSPHRASE`（仓库 Settings → Secrets and variables → Actions），
 # 用作 gpg 对称加密的口令（AES256）。未配置时本 workflow 会在第一步直接报错退出。
 #
+# ⚠️ Cap 通过方式：本项目自带的 `--pow` 纯协议 PoW（不启动浏览器，runner 上无 Chromium/xvfb）。
+# 若生产服务端开启 Cap instrumentation 并拒绝纯 PoW（错误名 cap.instr_blocked），
+# 提取步骤会以非零码结束、本次不发布任何产物：这是可接受的表现，
+# 重试机制 = Actions 失败运行记录的人工重放 + 下一天 schedule 自然重试。
+#
 # 后果分支名：`nodes`（独立 orphan 分支，只包含 links/ 与 content/ 目录，
 # 与 main 无共同历史；本 workflow 除此之外不触碰任何分支）。
 #
@@ -56,10 +61,7 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Install Chromium for Playwright
-        run: bunx playwright install chromium --with-deps
-
-      - name: Extract nodes (headed chromium via xvfb)
+      - name: Extract nodes (pure protocol PoW, no browser)
         id: extract
         run: |
           set -euo pipefail
@@ -68,7 +70,7 @@ jobs:
           echo "ts=${TS}" >> "$GITHUB_OUTPUT"
 
           set +e
-          xvfb-run -a bun run bin/register.ts --json --save-link out/links.txt --save-content out/content.txt > out/stdout.json 2> out/stderr.log
+          bun run bin/register.ts --pow --json --save-link out/links.txt --save-content out/content.txt > out/stdout.json 2> out/stderr.log
           rc=$?
           set -e
 
