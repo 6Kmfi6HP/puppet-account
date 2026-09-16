@@ -107,7 +107,8 @@ jobs:
           TS: ${{ steps.extract.outputs.ts }}
         run: |
           set -euo pipefail
-          DATE_PATH="${TS:0:4}/${TS:4:2}/${TS:6:2}"  # YYYY/MM/DD (UTC, 取自提取时刻)
+          TODAY="${TS:0:8}"                     # YYYYMMDD (UTC, 取自提取时刻)
+          CUTOFF="$(date -u -d "-6 days" +%Y%m%d)"  # 阈值，保留 TODAY-CUTOFF+1=7 个日期（含当天）
           PUB="${RUNNER_TEMP}/nodes-pub"
 
           git init -b nodes "${PUB}"
@@ -122,15 +123,87 @@ jobs:
             git checkout -B nodes FETCH_HEAD
           fi
 
-          # 推送到仓库根目录的固定文件名，远程订阅 URL 永远稳定：
-          #   https://raw.githubusercontent.com/<owner>/<repo>/nodes/links.txt
-          #   https://raw.githubusercontent.com/<owner>/<repo>/nodes/content.txt
-          # 每次运行覆盖同一份；process 语义是"latest 快照"。
-          # 如需历史归档可另开 dated/ 子目录（本 workflow 暂未启用）。
-          cp "${GITHUB_WORKSPACE}/out/links.txt"   links.txt
-          cp "${GITHUB_WORKSPACE}/out/content.txt" content.txt
+          # ============ 7 天滚动增量合并 ============
+          # history/links/<YYYYMMDD>.txt   —— 当天提取的所有订阅 URL (一行一个)
+          # history/content/<YYYYMMDD>/    —— 当天每个 URL 抓到的 content body
+          #     <base64url(url)>.txt       —— 文件名是 URL 的 base64url，同 URL 多次提取会覆盖
+          #
+          # links.txt     = 近 7 天 (TODAY-6 .. TODAY) 的 links/*.txt 合并去重
+          # content.txt   = 近 7 天每个 URL 的 latest body 直接拼接 (空行分隔)
+          #
+          # 站点会做服务端去重时，同一 URL 重复出现不会制造重复节点。
 
-          git add links.txt content.txt
+          mkdir -p history/links "history/content/${TODAY}"
+
+          # 合并当天 run 到 history/links/<YYYYMMDD>.txt
+          touch "history/links/${TODAY}.txt"
+          if [ -f out/links.txt ]; then
+            cat out/links.txt "history/links/${TODAY}.txt" 2>/dev/null \
+              | awk 'NF' | sort -u > history/links.tmp
+            mv history/links.tmp "history/links/${TODAY}.txt"
+          fi
+
+          # 把当天 run 的 content 按 URL 分文件存到 history/content/<YYYYMMDD>/
+          if [ -f out/links.txt ] && [ -f out/content.txt ]; then
+            SPLIT_DIR="${RUNNER_TEMP}/split-new"
+            rm -rf "${SPLIT_DIR}"
+            mkdir -p "${SPLIT_DIR}"
+            awk 'BEGIN{RS=""; FS="\n"} {fn=sprintf("%s/part-%06d.txt", "'"${SPLIT_DIR}"'", NR); print > fn; close(fn)}' \
+              out/content.txt
+            N_NEW=$(awk 'NF' out/links.txt | wc -l | tr -d ' ')
+            i=0
+            while IFS= read -r url; do
+              [ -z "$url" ] && continue
+              i=$((i + 1))
+              KEY="$(printf '%s' "$url" | base64 | tr '+/' '-_' | tr -d '=')"
+              PART="${SPLIT_DIR}/part-$(printf '%06d' "$i").txt"
+              if [ -f "$PART" ]; then
+                cp "$PART" "history/content/${TODAY}/${KEY}.txt"
+              fi
+            done < out/links.txt
+          fi
+
+          # 丢弃超过 7 天的 history
+          for d in history/links history/content; do
+            for f in "${d}"/*; do
+              [ -e "$f" ] || continue
+              name="$(basename "${f%.txt}")"
+              if [[ "$name" =~ ^[0-9]{8}$ ]] && [ "$name" -lt "$CUTOFF" ]; then
+                rm -rf "$f"
+              fi
+            done
+          done
+
+          # 由近 7 天快照重建固定 links.txt
+          : > links.txt
+          for i in 0 1 2 3 4 5 6; do
+            f="history/links/$(date -u -d "-${i} days" +%Y%m%d).txt"
+            [ -f "$f" ] && cat "$f"
+          done | sort -u > links.txt.tmp
+          mv links.txt.tmp links.txt
+
+          # 由近 7 天快照重建固定 content.txt (对近 7 天每个 URL 取最新 body)
+          TMP_NEW="${RUNNER_TEMP}/content-new"
+          rm -rf "${TMP_NEW}"
+          mkdir -p "${TMP_NEW}"
+          for i in 0 1 2 3 4 5 6; do
+            d="$(date -u -d "-${i} days" +%Y%m%d)"
+            if [ -d "history/content/${d}" ]; then
+              cp "history/content/${d}/"*.txt "${TMP_NEW}/" 2>/dev/null || true
+            fi
+          done
+          : > content.txt
+          first=1
+          for f in "${TMP_NEW}"/*.txt; do
+            [ -f "$f" ] || continue
+            if [ "$first" -eq 0 ]; then
+              printf '\n' >> content.txt
+            fi
+            cat "$f" >> content.txt
+            first=0
+          done
+
+          git add links.txt content.txt history
           if git diff --cached --quiet; then
             echo "Nothing new to publish."
             exit 0
