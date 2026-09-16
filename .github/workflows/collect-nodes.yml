@@ -74,9 +74,10 @@ jobs:
 
           # 先把产物文件与 stdout/stderr 中出现的关键字段（订阅链接等）全部 add-mask，
           # 之后任何日志输出即使包含这些值也会被 GitHub 自动打码。
+          # grep 无匹配时 exit 1，会在 pipefail + set -e 下误判整步失败，故整套管道加 || true。
           for f in out/links.txt out/content.txt out/stdout.json out/stderr.log; do
             [ -f "$f" ] || continue
-            grep -oE 'https?://[^[:space:]"'"'"']+' "$f" | sort -u | while IFS= read -r u; do
+            { grep -oE '(https?|vmess|ss|trojan|vless)://[^[:space:]"'"'"'<>]+' "$f" || true; } | sort -u | while IFS= read -r u; do
               [ -n "$u" ] && echo "::add-mask::${u}"
             done
           done
@@ -162,9 +163,13 @@ jobs:
         if: always()
         run: |
           if [ -f out/ok ]; then
+            TS="${{ steps.extract.outputs.ts }}"
+            DATE_PATH="${TS:0:4}/${TS:4:2}/${TS:6:2}"
             echo "- run id: \`${GITHUB_RUN_ID}\`"
             echo "- links extracted: \`${{ steps.extract.outputs.links }}\`"
-            echo "- artifacts on \`nodes\` branch under \`links/${{ steps.extract.outputs.ts }}\`'s YYYY/MM/DD tree (run-id + timestamp filenames)"
+            echo "- artifacts on \`nodes\` branch:"
+            echo "  - \`links/${DATE_PATH}/links-${GITHUB_RUN_ID}-${TS}.txt.gpg\`"
+            echo "  - \`content/${DATE_PATH}/content-${GITHUB_RUN_ID}-${TS}.txt.gpg\`"
           else
             echo "::warning::Extraction step failed — nothing was published. Re-run via Actions → collect-nodes → Run workflow."
           fi
