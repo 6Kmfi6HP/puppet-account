@@ -11,11 +11,12 @@
 # 提取步骤会以非零码结束、本次不发布任何产物：这是可接受的表现，
 # 重试机制 = Actions 失败运行记录的人工重放 + 下一天 schedule 自然重试。
 #
-# 后果分支名：`nodes`（独立 orphan 分支）。为了订阅 URL 永远稳定，每次运行
-# 都覆盖仓库根目录下的同两个固定文件（process 语义是"latest 快照"）：
-#   - links.txt    订阅链接，每行一个，直接可被阅读器订阅
-#   - content.txt  订阅内容（抓取订阅链接后的正文）
-# 之后若要加「每日历史备份」再引入 dated/ 子目录，不影响这两个固定入口。
+# 后果分支名：`nodes`（独立 orphan 分支）。每次运行把当天提取追加进 history/，
+# 并重建两个固定入口文件（链接/内容都会一直包含近 7 天的累计结果）：
+#   - links.txt    近 7 天合并去重后的订阅链接（一行一个）
+#   - content.txt  近 7 天所有链接的最新 body 先 base64 解码、逐行聚合去重、再 base64
+#                  编码——这是 v2ray/clash 类客户端可直接消费的「订阅」形态。
+# 历史目录结构：history/links/<YYYYMMDD>.txt、history/content/<YYYYMMDD>/<url-key>.txt。
 #
 # 失败时人工重放：Actions 页签 → 本 workflow（collect-nodes）→ Run workflow
 # （选 main 分支）手动触发；每次会覆盖同名固定文件，内容以最后一次成功提取为准。
@@ -108,8 +109,8 @@ jobs:
         run: |
           set -euo pipefail
           TODAY="${TS:0:8}"                     # YYYYMMDD (UTC, 取自提取时刻)
-          CUTOFF="$(date -u -d "-6 days" +%Y%m%d)"  # 阈值，保留 TODAY-CUTOFF+1=7 个日期（含当天）
           PUB="${RUNNER_TEMP}/nodes-pub"
+          TODAY_DIR="history/content/${TODAY}"
 
           git init -b nodes "${PUB}"
           cd "${PUB}"
@@ -117,96 +118,138 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
 
-          # nodes 已是 orphan：首次 push 直接创建；已存在则基于其 tip 续写历史，
-          # 绝不抓取/合入 main 或其他分支。
+          # nodes 已是 orphan：已存在则基于其 tip 续写历史；首次 push 直接创建。
           if git fetch --depth=1 origin nodes; then
             git checkout -B nodes FETCH_HEAD
           fi
+          mkdir -p history/links "${TODAY_DIR}"
+
+          # 从 GitHub workspace 拷贝本次 run 产物到 publish 工作区（两边 cwd 不同）。
+          cp "${GITHUB_WORKSPACE}/out/links.txt"   out.links.txt
+          cp "${GITHUB_WORKSPACE}/out/content.txt" out.content.txt
 
           # ============ 7 天滚动增量合并 ============
-          # history/links/<YYYYMMDD>.txt   —— 当天提取的所有订阅 URL (一行一个)
-          # history/content/<YYYYMMDD>/    —— 当天每个 URL 抓到的 content body
-          #     <base64url(url)>.txt       —— 文件名是 URL 的 base64url，同 URL 多次提取会覆盖
+          # history/links/<YYYYMMDD>.txt    —— 当天提取的所有订阅 URL (一行一个)
+          # history/content/<YYYYMMDD>/      —— 当天每个 URL 抓到的「原始」(base64) body
+          #     <base64url(url)>.txt        —— 文件名是 URL 的 base64url，同 URL 多次提取会覆盖
           #
-          # links.txt     = 近 7 天 (TODAY-6 .. TODAY) 的 links/*.txt 合并去重
-          # content.txt   = 近 7 天每个 URL 的 latest body 直接拼接 (空行分隔)
-          #
-          # 站点会做服务端去重时，同一 URL 重复出现不会制造重复节点。
+          # links.txt   = 近 7 天 (TODAY-6 .. TODAY) 的 links/*.txt 合并去重 (一行一个 URL)
+          # content.txt = 近 7 天所有 URL 的最新 body 先 base64 解码、逐行聚合去重、再 base64
+          #               —— 这是 v2ray/clash 类客户端最通用的「订阅」形态；只把 base64 外层
+          #               拼接并不能让客户端读到多份订阅。
 
-          mkdir -p history/links "history/content/${TODAY}"
+          TODAY="${TODAY}" TODAY_DIR="${TODAY_DIR}" python3 - <<'PYEOF'
+          import base64, os, pathlib, re
+          from datetime import datetime, timedelta, timezone
 
-          # 合并当天 run 到 history/links/<YYYYMMDD>.txt
-          touch "history/links/${TODAY}.txt"
-          if [ -f out/links.txt ]; then
-            cat out/links.txt "history/links/${TODAY}.txt" 2>/dev/null \
-              | awk 'NF' | sort -u > history/links.tmp
-            mv history/links.tmp "history/links/${TODAY}.txt"
-          fi
+          today = os.environ["TODAY"]
+          today_d = datetime.strptime(today, "%Y%m%d").replace(tzinfo=timezone.utc)
+          cutoff = (today_d - timedelta(days=6)).strftime("%Y%m%d")  # 保留近 7 天
 
-          # 把当天 run 的 content 按 URL 分文件存到 history/content/<YYYYMMDD>/
-          if [ -f out/links.txt ] && [ -f out/content.txt ]; then
-            SPLIT_DIR="${RUNNER_TEMP}/split-new"
-            rm -rf "${SPLIT_DIR}"
-            mkdir -p "${SPLIT_DIR}"
-            awk 'BEGIN{RS=""; FS="\n"} {fn=sprintf("%s/part-%06d.txt", "'"${SPLIT_DIR}"'", NR); print > fn; close(fn)}' \
-              out/content.txt
-            N_NEW=$(awk 'NF' out/links.txt | wc -l | tr -d ' ')
-            i=0
-            while IFS= read -r url; do
-              [ -z "$url" ] && continue
-              i=$((i + 1))
-              KEY="$(printf '%s' "$url" | base64 | tr '+/' '-_' | tr -d '=')"
-              PART="${SPLIT_DIR}/part-$(printf '%06d' "$i").txt"
-              if [ -f "$PART" ]; then
-                cp "$PART" "history/content/${TODAY}/${KEY}.txt"
-              fi
-            done < out/links.txt
-          fi
+          pub = pathlib.Path(".")
+          links_dir = pub / "history" / "links"
+          content_root = pub / "history" / "content"
+          out_links = pub / "out.links.txt"
+          out_content = pub / "out.content.txt"
 
-          # 丢弃超过 7 天的 history (history/links 是 .txt 文件；history/content 是日期子目录)
-          for f in history/links/*.txt; do
-            [ -e "$f" ] || continue
-            name="$(basename "${f%.txt}")"
-            if [ "$name" -lt "$CUTOFF" ] 2>/dev/null; then
-              rm -f "$f"
-            fi
-          done
-          for d in history/content/*/; do
-            [ -d "$d" ] || continue
-            name="$(basename "$d")"
-            if [ "$name" -lt "$CUTOFF" ] 2>/dev/null; then
-              rm -rf "$d"
-            fi
-          done
 
-          # 由近 7 天快照重建固定 links.txt
-          : > links.txt
-          for i in 0 1 2 3 4 5 6; do
-            f="history/links/$(date -u -d "-${i} days" +%Y%m%d).txt"
-            [ -f "$f" ] && cat "$f"
-          done | sort -u > links.txt.tmp
-          mv links.txt.tmp links.txt
+          def url_key(url: str) -> str:
+              return base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
 
-          # 由近 7 天快照重建固定 content.txt (对近 7 天每个 URL 取最新 body)
-          TMP_NEW="${RUNNER_TEMP}/content-new"
-          rm -rf "${TMP_NEW}"
-          mkdir -p "${TMP_NEW}"
-          for i in 0 1 2 3 4 5 6; do
-            d="$(date -u -d "-${i} days" +%Y%m%d)"
-            if [ -d "history/content/${d}" ]; then
-              cp "history/content/${d}/"*.txt "${TMP_NEW}/" 2>/dev/null || true
-            fi
-          done
-          : > content.txt
-          first=1
-          for f in "${TMP_NEW}"/*.txt; do
-            [ -f "$f" ] || continue
-            if [ "$first" -eq 0 ]; then
-              printf '\n' >> content.txt
-            fi
-            cat "$f" >> content.txt
-            first=0
-          done
+
+          # ---- 1) 把当天 run 合并到 history/links/<YYYYMMDD>.txt ----
+          day_links_file = links_dir / f"{today}.txt"
+          existing = set()
+          if day_links_file.exists():
+              existing = {
+                  ln.strip()
+                  for ln in day_links_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                  if ln.strip()
+              }
+          if out_links.exists():
+              for ln in out_links.read_text(encoding="utf-8", errors="ignore").splitlines():
+                  ln = ln.strip()
+                  if ln:
+                      existing.add(ln)
+          day_links_file.write_text(
+              "\n".join(sorted(existing)) + ("\n" if existing else ""), encoding="utf-8"
+          )
+
+          # ---- 2) 把当天 run 的 content 按 URL 分文件存到 history/content/<YYYYMMDD>/ ----
+          # 对 content.txt 按「一个或多个空行」切成多段，第 i 段对应第 i 条 link；body 写到以
+          # base64url(url) 命名的文件，同 URL 多次提取会覆盖。
+          if out_links.exists() and out_content.exists():
+              urls = [
+                  ln.strip()
+                  for ln in out_links.read_text(encoding="utf-8", errors="ignore").splitlines()
+                  if ln.strip()
+              ]
+              raw = out_content.read_bytes()
+              parts = [p for p in re.split(rb"\n\s*\n+", raw) if p.strip()]
+              (content_root / today).mkdir(parents=True, exist_ok=True)
+              for i, url in enumerate(urls):
+                  if i >= len(parts):
+                      break
+                  (content_root / today / f"{url_key(url)}.txt").write_bytes(parts[i])
+
+          # ---- 3) 丢弃早于 CUTOFF 的 history（保留 CUTOFF..TODAY 共 7 天） ----
+          for f in links_dir.glob("*.txt"):
+              stem = f.stem
+              if re.fullmatch(r"\d{8}", stem) and stem < cutoff:
+                  f.unlink()
+          for d in content_root.iterdir():
+              if d.is_dir() and re.fullmatch(r"\d{8}", d.name) and d.name < cutoff:
+                  for f in d.iterdir():
+                      f.unlink()
+                  d.rmdir()
+
+          # ---- 4) 由近 7 天 links 重建固定 links.txt ----
+          merged_links = set()
+          for i in range(7):
+              d = (today_d - timedelta(days=i)).strftime("%Y%m%d")
+              f = links_dir / f"{d}.txt"
+              if f.exists():
+                  for ln in f.read_text(encoding="utf-8", errors="ignore").splitlines():
+                      ln = ln.strip()
+                      if ln:
+                          merged_links.add(ln)
+          (pub / "links.txt").write_text(
+              "\n".join(sorted(merged_links)) + ("\n" if merged_links else ""), encoding="utf-8"
+          )
+
+          # ---- 5) 由近 7 天 content 重建固定 content.txt ----
+          # 同一 base64url URL key 在多日里让「更近日期」覆盖（i 越小越新，后写覆盖）。
+          per_url = {}
+          for i in range(6, -1, -1):
+              d = (today_d - timedelta(days=i)).strftime("%Y%m%d")
+              d_dir = content_root / d
+              if not d_dir.is_dir():
+                  continue
+              for f in d_dir.glob("*.txt"):
+                  per_url[f.stem] = f.read_bytes()
+
+          decoded_lines = []
+          seen = set()
+          for url_key_str in sorted(per_url):  # 稳定输出顺序（按 URL key 字典序）
+              raw_body = per_url[url_key_str].strip()
+              if not raw_body:
+                  continue
+              # 尝试 base64 解码；失败则跳过该 URL 的 body（旧格式/损坏文件不阻塞当天流程）。
+              body = raw_body.decode("ascii", errors="ignore")
+              padding = "=" * ((4 - len(body) % 4) % 4)
+              try:
+                  decoded = base64.b64decode(body + padding).decode("utf-8", errors="ignore")
+              except Exception:
+                  continue
+              for ln in decoded.splitlines():
+                  ln = ln.rstrip()
+                  if ln and ln not in seen:
+                      seen.add(ln)
+                      decoded_lines.append(ln)
+
+          plain = ("\n".join(decoded_lines) + ("\n" if decoded_lines else "")).encode("utf-8")
+          (pub / "content.txt").write_bytes(base64.b64encode(plain))
+          PYEOF
 
           git add links.txt content.txt history
           if git diff --cached --quiet; then
@@ -217,7 +260,6 @@ jobs:
           # （GitHub 官方保护机制防递归），见文件顶部注释。
           git commit -m "nodes: links+content run ${GITHUB_RUN_ID} (${TS})"
           git push origin nodes
-
       - name: Summary
         if: always()
         run: |
