@@ -14,7 +14,8 @@
   "scripts": {
     "register": "bun run bin/register.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:cap-pow": "bun run src/cap/pow.selftest.ts"
+    "test:cap-pow": "bun run src/cap/pow.selftest.ts",
+    "test:export-sub": "bun run src/export-sub.selftest.ts"
   },
   "dependencies": {
     "@cap.js/wasm": "0.0.7",

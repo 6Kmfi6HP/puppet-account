@@ -45,8 +45,12 @@ bun run register -- --token '<cap-token>' --json
 
 # 指定推荐码 / 模式
 bun run register -- --referral FSR-XXXX --mode freedom-ws
+
+# 导出订阅：链接每行一个 + 订阅内容（对订阅 URL 的一次 GET 正文）分别追加到 txt
+bun run register -- --save-link links.txt --save-content content.txt
 ```
 
+`--save-link` / `--save-content` 均为追加写、不去重、UTF-8、每行一条；配合 `--json` 时结果里多出 `saves: { link, content }`，任一写入失败会以退出码 3 标记部分成功（账号本身不受影响）。`--account-only` 没有订阅 URL 时两个参数都会跳过。
 完整参数见 `bun run register -- --help`。
 
 ## 作为库
@@ -82,6 +86,8 @@ sdk/
 │   ├── pins.ts              # 从 SPA e2ee chunk 发现静态 HPKE kid
 │   ├── pins.freesocks.json  # 生产 pins 兜底快照
 │   ├── types.ts             # 公共类型 + SdkError
+│   ├── exportSub.ts         # CLI 导出：订阅链接追加 / 订阅内容抓取
+│   ├── export-sub.selftest.ts # 本地 HTTP 自测（离线）
 │   ├── cap/
 │   │   ├── browser.ts       # Playwright Cap（生产路径，默认 headed）
 │   │   ├── pow.ts           # 纯 PoW solve（自托管无 instrumentation）
@@ -104,6 +110,7 @@ sdk/
 ```bash
 bun run typecheck       # tsc --noEmit
 bun run test:cap-pow    # 网络 smoke：真实 challenge → WASM PoW（不 redeem 成功）
+bun run test:export-sub # 离线自测：订阅链接/内容 txt 导出
 ```
 
 ## 错误码
@@ -123,6 +130,9 @@ bun run test:cap-pow    # 网络 smoke：真实 challenge → WASM PoW（不 red
 | `pins.not_found` | 从 SPA assets 中未能发现 HPKE pins |
 | `pins.missing_kid` | 缺少 `hpkeKid`，无法打开信封响应 |
 | `auth.no_cookie` | 账号已建但未收到 `fs_session` cookie |
+| `sub.fetch_failed` | 订阅内容抓取网络异常（CLI `--save-content`） |
+| `sub.http` | 订阅链接抓取返回非 2xx（CLI `--save-content`） |
+| `sub.empty` | 订阅链接抓取返回空正文（CLI `--save-content`） |
 | `network` | fetch 网络异常 |
 | `http.<status>` | 服务端返回非 2xx（如 `http.401`） |
 | `aborted` | 调用方 `AbortSignal` 终止 |
