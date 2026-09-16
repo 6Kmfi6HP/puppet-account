@@ -79,6 +79,17 @@ async function resolveCaptchaToken(opts: RegisterOptions & {
       'cap.token_required',
     );
   }
+  if (opts.captcha === 'pow') {
+    // Pure-protocol path: challenge → WASM solve_pow → instrumentation (via
+    // cap/instr.ts) → redeem. Endpoint mirrors the browser path: the public
+    // config exposes a same-origin placeholder like `/cap`, so the real base
+    // is `${baseUrl}/cap/${siteKey}` unless the deployment overrides it.
+    const endpoint = opts.apiEndpoint.startsWith('http')
+      ? opts.apiEndpoint.replace(/\/$/, '')
+      : `${opts.baseUrl}${opts.apiEndpoint.replace(/\/$/, '')}/${opts.siteKey}`;
+    const { mintCapTokenPow } = await import('./cap/pow.ts');
+    return mintCapTokenPow({ endpoint, signal: opts.signal });
+  }
   // Production Cap needs browser instrumentation — pure PoW is rejected.
   return mintCapTokenBrowser({
     baseUrl: opts.baseUrl,

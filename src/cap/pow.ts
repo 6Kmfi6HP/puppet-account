@@ -1,13 +1,13 @@
 /**
  * Cap PoW solver (challenge → WASM solve → redeem).
  *
- * Production FreeSocks Cap REQUIRES a valid instrumentation (`instr`) response
- * minted inside a real browser iframe. Pure PoW redeem is rejected with
- * `missing_instrumentation_response`. This module is kept for:
- *   - self-hosted Cap without instrumentation
- *   - integration tests mirroring repo/convex/lib/captcha.integration.test.ts
+ * When the challenge response carries an `instrumentation` payload and the
+ * caller did not inject `opts.instr` themselves, this module solves it
+ * locally via cap/instr.ts (pure protocol, no browser) and attaches the
+ * resulting `{i, state, ts}` to the redeem body.
  */
 import * as capWasm from '@cap.js/wasm/node/cap_wasm.js';
+import { solveInstr } from './instr.ts';
 import { SdkError } from '../types.ts';
 
 /** Deterministic seeded RNG — verbatim from @cap.js/widget. */
@@ -75,8 +75,13 @@ export async function mintCapTokenPow(opts: CapPowOptions): Promise<string> {
   }
 
   const solutions = challenges.map(([salt, target]) => Number(capWasm.solve_pow(salt, target)));
+
+  let instr = opts.instr;
+  if (instr === undefined && typeof ch.instrumentation === 'string' && ch.instrumentation) {
+    instr = await solveInstr(ch.instrumentation);
+  }
   const body: Record<string, unknown> = { token: ch.token, solutions };
-  if (opts.instr !== undefined) body.instr = opts.instr;
+  if (instr !== undefined) body.instr = instr;
 
   const rRaw = await fetch(`${base}redeem`, {
     method: 'POST',

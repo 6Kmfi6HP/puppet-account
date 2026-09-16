@@ -19,6 +19,7 @@ Options:
   --location <code>      Node location preference (or "auto")
   --account-only         Skip connection-mode + regenerate
   --token <capToken>     Use a pre-minted Cap token (no browser)
+  --pow                  Solve Cap purely in-protocol (no browser)
   --headed / --headless  Cap browser mode (default: headed)
   --json                 Print machine-readable JSON only
   -h, --help             Show help
@@ -53,6 +54,7 @@ async function main(): Promise<void> {
       })(),
       accountOnly: argv.includes('--account-only'),
       captchaToken: argValue(argv, '--token'),
+      captcha: argv.includes('--pow') ? 'pow' : undefined,
       headed,
     });
 

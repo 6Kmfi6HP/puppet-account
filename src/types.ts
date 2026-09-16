@@ -24,7 +24,7 @@ export interface RegisterOptions {
    */
   captchaToken?: string;
   /** Cap solve strategy when captchaToken is absent (default: browser). */
-  captcha?: 'browser' | 'none';
+  captcha?: 'browser' | 'none' | 'pow';
   /** Playwright headed mode (default true — headless is blocked by Cap instrumentation). */
   headed?: boolean;
   /** Explicit E2EE pins; when omitted the SDK discovers them from the SPA bundle. */
