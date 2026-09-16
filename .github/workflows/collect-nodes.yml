@@ -163,15 +163,20 @@ jobs:
             done < out/links.txt
           fi
 
-          # 丢弃超过 7 天的 history
-          for d in history/links history/content; do
-            for f in "${d}"/*; do
-              [ -e "$f" ] || continue
-              name="$(basename "${f%.txt}")"
-              if [[ "$name" =~ ^[0-9]{8}$ ]] && [ "$name" -lt "$CUTOFF" ]; then
-                rm -rf "$f"
-              fi
-            done
+          # 丢弃超过 7 天的 history (history/links 是 .txt 文件；history/content 是日期子目录)
+          for f in history/links/*.txt; do
+            [ -e "$f" ] || continue
+            name="$(basename "${f%.txt}")"
+            if [ "$name" -lt "$CUTOFF" ] 2>/dev/null; then
+              rm -f "$f"
+            fi
+          done
+          for d in history/content/*/; do
+            [ -d "$d" ] || continue
+            name="$(basename "$d")"
+            if [ "$name" -lt "$CUTOFF" ] 2>/dev/null; then
+              rm -rf "$d"
+            fi
           done
 
           # 由近 7 天快照重建固定 links.txt
