@@ -11,11 +11,14 @@
 # 提取步骤会以非零码结束、本次不发布任何产物：这是可接受的表现，
 # 重试机制 = Actions 失败运行记录的人工重放 + 下一天 schedule 自然重试。
 #
-# 后果分支名：`nodes`（独立 orphan 分支，只包含 links/ 与 content/ 目录，
-# 与 main 无共同历史；本 workflow 除此之外不触碰任何分支）。
+# 后果分支名：`nodes`（独立 orphan 分支）。为了订阅 URL 永远稳定，每次运行
+# 都覆盖仓库根目录下的同两个固定文件（process 语义是"latest 快照"）：
+#   - links.txt    订阅链接，每行一个，直接可被阅读器订阅
+#   - content.txt  订阅内容（抓取订阅链接后的正文）
+# 之后若要加「每日历史备份」再引入 dated/ 子目录，不影响这两个固定入口。
 #
 # 失败时人工重放：Actions 页签 → 本 workflow（collect-nodes）→ Run workflow
-# （选 main 分支）手动触发；产物文件名带 run id + UTC 时间戳，重放不会互相覆盖。
+# （选 main 分支）手动触发；每次会覆盖同名固定文件，内容以最后一次成功提取为准。
 #
 # ✅ 注意：push 到 nodes 分支用的是 GITHUB_TOKEN，默认权限下 GITHUB_TOKEN 触发的
 # push 事件不会再启动新的 workflow run（GitHub 保护机制，防止递归触发），
@@ -119,11 +122,15 @@ jobs:
             git checkout -B nodes FETCH_HEAD
           fi
 
-          mkdir -p "links/${DATE_PATH}" "content/${DATE_PATH}"
-          mv "${GITHUB_WORKSPACE}/out/links.txt"   "links/${DATE_PATH}/links-${GITHUB_RUN_ID}-${TS}.txt"
-          mv "${GITHUB_WORKSPACE}/out/content.txt" "content/${DATE_PATH}/content-${GITHUB_RUN_ID}-${TS}.txt"
+          # 推送到仓库根目录的固定文件名，远程订阅 URL 永远稳定：
+          #   https://raw.githubusercontent.com/<owner>/<repo>/nodes/links.txt
+          #   https://raw.githubusercontent.com/<owner>/<repo>/nodes/content.txt
+          # 每次运行覆盖同一份；process 语义是"latest 快照"。
+          # 如需历史归档可另开 dated/ 子目录（本 workflow 暂未启用）。
+          cp "${GITHUB_WORKSPACE}/out/links.txt"   links.txt
+          cp "${GITHUB_WORKSPACE}/out/content.txt" content.txt
 
-          git add links content
+          git add links.txt content.txt
           if git diff --cached --quiet; then
             echo "Nothing new to publish."
             exit 0
@@ -138,12 +145,11 @@ jobs:
         run: |
           if [ -f out/ok ]; then
             TS="${{ steps.extract.outputs.ts }}"
-            DATE_PATH="${TS:0:4}/${TS:4:2}/${TS:6:2}"
             echo "- run id: \`${GITHUB_RUN_ID}\`"
             echo "- links extracted: \`${{ steps.extract.outputs.links }}\`"
-            echo "- artifacts on \`nodes\` branch:"
-            echo "  - \`links/${DATE_PATH}/links-${GITHUB_RUN_ID}-${TS}.txt\`"
-            echo "  - \`content/${DATE_PATH}/content-${GITHUB_RUN_ID}-${TS}.txt\`"
+            echo "- artifacts on \`nodes\` branch (固定路径，URL 永不变化):"
+            echo "  - \`links.txt\`   -> raw.githubusercontent.com/${GITHUB_REPOSITORY}/nodes/links.txt"
+            echo "  - \`content.txt\` -> raw.githubusercontent.com/${GITHUB_REPOSITORY}/nodes/content.txt"
           else
             echo "::warning::Extraction step failed — nothing was published. Re-run via Actions → collect-nodes → Run workflow."
           fi
