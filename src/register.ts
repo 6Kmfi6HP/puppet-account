@@ -49,21 +49,45 @@ export async function registerAccount(opts: RegisterOptions = {}): Promise<Regis
 
   if (opts.accountOnly) return result;
 
-  const modeId =
-    opts.modeId ??
-    config.connectionModes.find((m) => m.isDefault && m.available)?.id ??
-    config.connectionModes.find((m) => m.available)?.id ??
-    'freedom-ws';
+  const available = config.connectionModes.filter((m) => m.available).map((m) => m.id);
 
-  await client.setConnectionMode(modeId, opts.signal);
-  result.modeId = modeId;
+  // Resolve the requested mode list. `modes` (or a single "all") expands to
+  // every available mode from the public config.
+  let modes: string[];
+  if (opts.modes?.length) {
+    modes = opts.modes.includes('all') ? available : opts.modes;
+  } else if (opts.modeId === 'all') {
+    modes = available;
+  } else {
+    const fallback =
+      config.connectionModes.find((m) => m.isDefault && m.available)?.id ??
+      config.connectionModes.find((m) => m.available)?.id ??
+      'freedom-ws';
+    modes = [opts.modeId ?? fallback];
+  }
+  if (modes.length === 0) {
+    throw new SdkError('No available connection modes in public config', 'modes.none');
+  }
 
-  const sub = await client.regenerate({
-    location: opts.location,
-    signal: opts.signal,
-  });
-  result.subscriptionUrl = sub.subscriptionUrl;
-  result.shortUuid = sub.shortUuid;
+  // One account, one subscription per mode: switch mode → regenerate. Each
+  // regenerate invalidates the previous URL, so the last mode's URL doubles as
+  // the top-level subscriptionUrl (kept for single-mode backward compatibility).
+  result.modeResults = [];
+  for (const modeId of modes) {
+    await client.setConnectionMode(modeId, opts.signal);
+    const sub = await client.regenerate({
+      location: opts.location,
+      signal: opts.signal,
+    });
+    result.modeId = modeId;
+    result.subscriptionUrl = sub.subscriptionUrl;
+    result.shortUuid = sub.shortUuid;
+    result.modeResults.push({
+      modeId,
+      subscriptionUrl: sub.subscriptionUrl,
+      shortUuid: sub.shortUuid,
+    });
+  }
   return result;
 }
 

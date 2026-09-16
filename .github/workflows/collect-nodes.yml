@@ -11,6 +11,11 @@
 # 提取步骤会以非零码结束、本次不发布任何产物：这是可接受的表现，
 # 重试机制 = Actions 失败运行记录的人工重放 + 下一天 schedule 自然重试。
 #
+# 多模式提取：register 用 `--mode all`，一个账号遍历 public config 中所有
+# available 的 connection-mode，每个模式 setConnectionMode → regenerate 出一份
+# 订阅；links.txt 每模式一行，content.txt 按相同顺序每模式一段（下方 python
+# 的「空行分段 + 第 i 段对应第 i 条 link」逻辑天然兼容）。
+#
 # 后果分支名：`nodes`（独立 orphan 分支）。每次运行把当天提取追加进 history/，
 # 并重建两个固定入口文件（链接/内容都会一直包含近 7 天的累计结果）：
 #   - links.txt    近 7 天合并去重后的订阅链接（一行一个）
@@ -62,7 +67,9 @@ jobs:
           echo "ts=${TS}" >> "$GITHUB_OUTPUT"
 
           set +e
-          bun run bin/register.ts --pow --json --save-link out/links.txt --save-content out/content.txt > out/stdout.json 2> out/stderr.log
+          # --mode all：对 public config 里所有 available 的 connection-mode 各
+          # regenerate 一份订阅，links.txt 每模式一行，content.txt 同序每模式一段。
+          bun run bin/register.ts --pow --mode all --json --save-link out/links.txt --save-content out/content.txt > out/stdout.json 2> out/stderr.log
           rc=$?
           set -e
 

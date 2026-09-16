@@ -46,6 +46,10 @@ bun run register -- --token '<cap-token>' --json
 # 指定推荐码 / 模式
 bun run register -- --referral FSR-XXXX --mode freedom-ws
 
+# 多模式批量提取：一个账号循环切换模式，每个模式各 regenerate 一份订阅
+# （--mode 接受逗号列表或 "all" = public config 里全部 available 模式）
+bun run register -- --mode all
+
 # 导出订阅：链接每行一个 + 订阅内容（对订阅 URL 的一次 GET 正文）分别追加到 txt
 bun run register -- --save-link links.txt --save-content content.txt
 ```
@@ -63,8 +67,10 @@ const account = await registerAccount({
   captchaToken,          // 可选；缺省则 headed Playwright 求解 Cap
   referralCode: 'FSR-…',
   modeId: 'freedom-ws',
+  modes: ['all'],        // 可选；多模式批量（优先于 modeId），"all" 展开全部可用模式
 });
 // account.accountId / subscriptionUrl / sessionCookie / popSessionToken
+// 多模式时还有 account.modeResults: [{ modeId, subscriptionUrl, shortUuid }, …]
 
 // 或自行编排（TG bot 里按对话步骤拆开）
 const pins = await discoverPins('https://freesocks.org');

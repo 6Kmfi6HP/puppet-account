@@ -12,8 +12,13 @@ export interface RegisterOptions {
   baseUrl?: string;
   /** Optional referral code (FSR-…) */
   referralCode?: string;
-  /** Connection mode id (default: freedom-ws) */
+  /** Connection mode id (default: freedom-ws). Use "all" for every available mode. */
   modeId?: string;
+  /**
+   * Multiple connection modes: the account is switched through each one and a
+   * subscription is regenerated per mode. Takes precedence over modeId.
+   */
+  modes?: string[];
   /** Node location code, or null for automatic */
   location?: string | null;
   /** Skip regenerate — only create the account number */
@@ -49,6 +54,15 @@ export interface RegisterResult {
   subscriptionUrl?: string;
   shortUuid?: string;
   modeId?: string;
+  /**
+   * Per-mode subscription results when registering with `modes` (order matches
+   * the requested modes). Empty when a single mode was used.
+   */
+  modeResults?: Array<{
+    modeId: string;
+    subscriptionUrl: string;
+    shortUuid: string;
+  }>;
 }
 
 export interface PublicConfig {

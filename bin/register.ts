@@ -18,7 +18,8 @@ function usage(): never {
 Options:
   --base-url <url>       API origin (default https://freesocks.org)
   --referral <code>      Optional FSR-… referral code
-  --mode <id>            Connection mode (default: catalog default / freedom-ws)
+  --mode <id|a,b|all>    Connection mode; a comma-separated list or "all"
+                         registers one subscription per mode (default: freedom-ws)
   --location <code>      Node location preference (or "auto")
   --account-only         Skip connection-mode + regenerate
   --token <capToken>     Use a pre-minted Cap token (no browser)
@@ -47,6 +48,17 @@ function argValue(argv: string[], name: string): string | undefined {
   return v;
 }
 
+/**
+ * --mode accepts a single id, a comma-separated list ("a,b,c") or "all".
+ * Returns undefined when the flag is absent (SDK picks the default).
+ */
+function parseModes(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  const modes = value.split(',').map((s) => s.trim()).filter(Boolean);
+  if (modes.length === 0) usage();
+  return modes;
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.includes('-h') || argv.includes('--help')) usage();
@@ -59,7 +71,8 @@ async function main(): Promise<void> {
     const result = await registerAccount({
       baseUrl: argValue(argv, '--base-url'),
       referralCode: argValue(argv, '--referral'),
-      modeId: argValue(argv, '--mode'),
+      modes: parseModes(argValue(argv, '--mode')),
+      modeId: parseModes(argValue(argv, '--mode'))?.at(-1),
       location: (() => {
         const loc = argValue(argv, '--location');
         if (loc === undefined) return undefined;
@@ -89,6 +102,11 @@ async function main(): Promise<void> {
     console.log(`  tier:       ${result.tier.name} (${result.tier.slug})`);
     console.log(`  backend:    ${result.tier.backend}`);
     if (result.modeId) console.log(`  mode:       ${result.modeId}`);
+    if (result.modeResults && result.modeResults.length > 1) {
+      for (const m of result.modeResults) {
+        console.log(`  [${m.modeId}] ${m.subscriptionUrl}`);
+      }
+    }
     if (result.shortUuid) console.log(`  shortUuid:  ${result.shortUuid}`);
     if (result.subscriptionUrl) {
       console.log(`  sub URL:    ${result.subscriptionUrl}`);
@@ -125,31 +143,48 @@ async function saveSubscription(
 ): Promise<{ link: boolean; content: boolean } | undefined> {
   const saves = { link: false, content: false };
   if (!opts.linkPath && !opts.contentPath) return undefined;
-  if (!result.subscriptionUrl) {
+
+  // Collect one entry per subscription: modeResults covers multi-mode runs;
+  // a single-mode run degrades to the top-level subscriptionUrl.
+  const entries = (result.modeResults ?? []).map((m) => ({
+    modeId: m.modeId,
+    url: m.subscriptionUrl,
+  }));
+  if (entries.length === 0 && result.subscriptionUrl) {
+    entries.push({ modeId: result.modeId ?? '', url: result.subscriptionUrl });
+  }
+  if (entries.length === 0) {
     console.error('Note: no subscriptionUrl (--account-only) — --save-link/--save-content skipped.');
     return saves;
   }
 
-  if (opts.linkPath) {
-    try {
-      await appendLine(opts.linkPath, result.subscriptionUrl);
-      saves.link = true;
-    } catch (e) {
-      console.error(`--save-link ${opts.linkPath}: ${errMessage(e)}`);
+  for (const { modeId, url } of entries) {
+    if (opts.linkPath) {
+      try {
+        await appendLine(opts.linkPath, url);
+        saves.link = true;
+      } catch (e) {
+        console.error(`--save-link ${opts.linkPath}: ${errMessage(e)}`);
+      }
     }
-  }
-
-  if (opts.contentPath) {
-    try {
-      const body = await fetchSubscriptionBody(result.subscriptionUrl);
-      await appendLine(opts.contentPath, body);
-      saves.content = true;
-    } catch (e) {
-      console.error(`--save-content ${opts.contentPath}: ${errMessage(e)}`);
+    if (opts.contentPath) {
+      try {
+        const body = await fetchSubscriptionBody(url);
+        // 空行分段：workflow 侧按「一个或多个空行」切分 content，第 i 段对应
+        // 第 i 条 link；多模式/多链接时缺空行会把相邻 base64 拼坏。
+        await appendLine(opts.contentPath, `${body}\n`);
+        saves.content = true;
+      } catch (e) {
+        console.error(`--save-content ${opts.contentPath}${modeLabel(modeId)}: ${errMessage(e)}`);
+      }
     }
   }
 
   return saves;
+}
+
+function modeLabel(modeId: string): string {
+  return modeId ? ` [${modeId}]` : '';
 }
 
 function errMessage(e: unknown): string {
