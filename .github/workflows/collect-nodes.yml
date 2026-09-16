@@ -1,12 +1,10 @@
-# collect-nodes — 每日在 GitHub Actions 上提取 FreeSocks 节点，加密后落到 `nodes` 分支。
+# collect-nodes — 每日在 GitHub Actions 上提取 FreeSocks 节点，明文落到 `nodes` 分支。
 #
 # 依赖（并行任务 M1）：bin/register.ts 的
 #   --save-link <path>    生成「订阅链接一行一个」txt
 #   --save-content <path> 生成「订阅内容」txt
-# 本 workflow 只调用该 CLI 并把两份 txt 加密入库，不修改 bin/ 或 src/。
-#
-# 写入的 Secret：`NODES_PASSPHRASE`（仓库 Settings → Secrets and variables → Actions），
-# 用作 gpg 对称加密的口令（AES256）。未配置时本 workflow 会在第一步直接报错退出。
+# 本 workflow 只调用该 CLI 并把两份 txt 明文入库（仓库公开，节点直接公开显示，不做加密），
+# 不修改 bin/ 或 src/。不需要任何 Secret。
 #
 # ⚠️ Cap 通过方式：本项目自带的 `--pow` 纯协议 PoW（不启动浏览器，runner 上无 Chromium/xvfb）。
 # 若生产服务端开启 Cap instrumentation 并拒绝纯 PoW（错误名 cap.instr_blocked），
@@ -17,8 +15,7 @@
 # 与 main 无共同历史；本 workflow 除此之外不触碰任何分支）。
 #
 # 失败时人工重放：Actions 页签 → 本 workflow（collect-nodes）→ Run workflow
-# （选 main 分支）手动触发；产物文件名带 run id + UTC 时间戳，重放不会互相覆盖，
-# 商店密钥缺失时先补 NODES_PASSPHRASE 再重放。
+# （选 main 分支）手动触发；产物文件名带 run id + UTC 时间戳，重放不会互相覆盖。
 #
 # ✅ 注意：push 到 nodes 分支用的是 GITHUB_TOKEN，默认权限下 GITHUB_TOKEN 触发的
 # push 事件不会再启动新的 workflow run（GitHub 保护机制，防止递归触发），
@@ -40,18 +37,9 @@ concurrency:
 
 jobs:
   extract:
-    name: Extract, encrypt, publish nodes
+    name: Extract and publish nodes
     runs-on: ubuntu-latest
     steps:
-      - name: Check NODES_PASSPHRASE is configured
-        env:
-          NODES_PASSPHRASE: ${{ secrets.NODES_PASSPHRASE }}
-        run: |
-          if [ -z "${NODES_PASSPHRASE:-}" ]; then
-            echo "::error title=missing secret::Set repository secret NODES_PASSPHRASE (Settings → Secrets and variables → Actions), then re-run this workflow."
-            exit 1
-          fi
-
       - uses: actions/checkout@v4
 
       - uses: oven-sh/setup-bun@v2
@@ -108,22 +96,6 @@ jobs:
           fi
           echo "links=$(wc -l < out/links.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
 
-      - name: Encrypt artifacts with gpg (AES256)
-        env:
-          NODES_PASSPHRASE: ${{ secrets.NODES_PASSPHRASE }}
-        run: |
-          set -euo pipefail
-          TS="${{ steps.extract.outputs.ts }}"
-          mkdir -p enc
-          gpg --batch --yes --symmetric --cipher-algo AES256 \
-            --passphrase "${NODES_PASSPHRASE}" \
-            -o "enc/links-${TS}.txt.gpg" -c out/links.txt
-          gpg --batch --yes --symmetric --cipher-algo AES256 \
-            --passphrase "${NODES_PASSPHRASE}" \
-            -o "enc/content-${TS}.txt.gpg" -c out/content.txt
-          # 明文从工作区彻底移除，绝不进入 git 索引
-          rm -f out/links.txt out/content.txt out/stdout.json out/stderr.log
-
       - name: Publish to orphan branch `nodes`
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -148,8 +120,8 @@ jobs:
           fi
 
           mkdir -p "links/${DATE_PATH}" "content/${DATE_PATH}"
-          mv "${GITHUB_WORKSPACE}/enc/links-${TS}.txt.gpg"   "links/${DATE_PATH}/links-${GITHUB_RUN_ID}-${TS}.txt.gpg"
-          mv "${GITHUB_WORKSPACE}/enc/content-${TS}.txt.gpg" "content/${DATE_PATH}/content-${GITHUB_RUN_ID}-${TS}.txt.gpg"
+          mv "${GITHUB_WORKSPACE}/out/links.txt"   "links/${DATE_PATH}/links-${GITHUB_RUN_ID}-${TS}.txt"
+          mv "${GITHUB_WORKSPACE}/out/content.txt" "content/${DATE_PATH}/content-${GITHUB_RUN_ID}-${TS}.txt"
 
           git add links content
           if git diff --cached --quiet; then
@@ -170,8 +142,8 @@ jobs:
             echo "- run id: \`${GITHUB_RUN_ID}\`"
             echo "- links extracted: \`${{ steps.extract.outputs.links }}\`"
             echo "- artifacts on \`nodes\` branch:"
-            echo "  - \`links/${DATE_PATH}/links-${GITHUB_RUN_ID}-${TS}.txt.gpg\`"
-            echo "  - \`content/${DATE_PATH}/content-${GITHUB_RUN_ID}-${TS}.txt.gpg\`"
+            echo "  - \`links/${DATE_PATH}/links-${GITHUB_RUN_ID}-${TS}.txt\`"
+            echo "  - \`content/${DATE_PATH}/content-${GITHUB_RUN_ID}-${TS}.txt\`"
           else
             echo "::warning::Extraction step failed — nothing was published. Re-run via Actions → collect-nodes → Run workflow."
           fi
